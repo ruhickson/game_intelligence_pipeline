@@ -1,0 +1,147 @@
+:root {
+  color-scheme: dark;
+  --bg: #140e0a;
+  --panel: #24180f;
+  --ink: #f6ead7;
+  --muted: #cbb89a;
+  --line: #6b4a2a;
+  --gold: #e2b657;
+  --dirt: #7a4b28;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top, #3a2414 0%, var(--bg) 55%);
+  color: var(--ink);
+  font: 16px/1.45 "Segoe UI", system-ui, sans-serif;
+}
+
+#app {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 20px 20px 32px;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 32px;
+  letter-spacing: 0.04em;
+}
+
+header p {
+  margin: 6px 0 16px;
+  max-width: 46rem;
+  color: var(--muted);
+}
+
+#layout {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+#field {
+  background: #0c0806;
+  border: 3px solid #3d2918;
+  border-radius: 8px;
+  image-rendering: pixelated;
+  touch-action: none;
+}
+
+#panel {
+  flex: 1 1 320px;
+  min-width: 280px;
+  max-width: 420px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px 16px;
+}
+
+#hud {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-weight: 700;
+  color: var(--gold);
+}
+
+#message {
+  min-height: 1.2em;
+  margin: 8px 0;
+  color: #f0d48a;
+}
+
+#prompt {
+  margin: 0 0 10px;
+  font-size: 20px;
+}
+
+.opt {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: #1a100b;
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+}
+
+.opt strong { display: block; }
+
+.opt span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.opt.selected {
+  border-color: var(--gold);
+  background: #3a2a12;
+}
+
+#meter {
+  min-height: 1.2em;
+  color: var(--gold);
+  font-weight: 700;
+}
+
+.card {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: #1a100b;
+  border: 1px solid #4a3422;
+}
+
+.card h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+.card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+#found h2 {
+  margin: 12px 0 8px;
+  font-size: 16px;
+  color: var(--gold);
+}
+
+#help, #source {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+#source { margin-bottom: 0; }

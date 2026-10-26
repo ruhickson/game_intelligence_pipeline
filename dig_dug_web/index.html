@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dig Dug — Find a Game</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>Dig Dug</h1>
+      <p>Dig the tunnels. When a pack of monsters stops you, pick one of their terms, then pump until they pop.</p>
+    </header>
+    <div id="layout">
+      <canvas id="field" tabindex="0" aria-label="Dig Dug field"></canvas>
+      <aside id="panel">
+        <div id="hud">
+          <span id="score">Score 0</span>
+          <span id="lives">Lives 3</span>
+          <span id="left">Encounters 0</span>
+        </div>
+        <p id="message"></p>
+        <h2 id="prompt">Loading the Find a Game list…</h2>
+        <div id="options"></div>
+        <p id="meter"></p>
+        <div id="found"></div>
+        <p id="help">Arrow keys or WASD move and dig. Number keys choose. Space pumps. A falling rock crushes whatever is under it.</p>
+        <p id="source"></p>
+      </aside>
+    </div>
+  </div>
+  <script src="/game.js"></script>
+</body>
+</html>
