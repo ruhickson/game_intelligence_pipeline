@@ -119,6 +119,12 @@ header p {
   font-size: 13px;
 }
 
+#shortfall {
+  margin: 8px 0 0;
+  color: #f0d48a;
+  font-weight: 700;
+}
+
 .card {
   margin: 0 0 10px;
   padding: 10px 12px;

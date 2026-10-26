@@ -1,5 +1,7 @@
-const TILE = 32;
-const LETTERS = ["A", "B", "C", "H", "I", "J", "K"];
+const TILE = 30;
+const LETTERS = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"];
+// Bottom avenue is the first tag group. The player digs upward.
+// A–F tags, G coarse recency (4), H fine recency (3), I review score (5), J review count (3).
 const MAP = [
   "###############",
   "#XXXXXXXXXXXXX#",
@@ -8,15 +10,21 @@ const MAP = [
   "#XXXXXXXXXXXXX#",
   "#XXXXXXXXXXXXX#",
   "#XXXXXXXXXXXXX#",
-  "#sssssssssssss#",
   "#ddddddddddddd#",
-  "#K.K..........#",
   "#sssssssssssss#",
-  "#J.J..........#",
+  "#J.J.J........#",
   "#ddddddddddddd#",
-  "#I.I..........#",
+  "#I.I.I.I.I....#",
   "#sssssssssssss#",
-  "#H.H..........#",
+  "#H.H.H........#",
+  "#ddddddddddddd#",
+  "#G.G.G.G......#",
+  "#sssssssssssss#",
+  "#F.F.F........#",
+  "#ddddddddddddd#",
+  "#E.E.E........#",
+  "#sssssssssssss#",
+  "#D.D.D........#",
   "#ddddddddddddd#",
   "#C.C.C........#",
   "#sssssssssssss#",
@@ -25,7 +33,7 @@ const MAP = [
   "#A.A.A........#",
   "#sssssssssssss#",
   "#ddddddddddddd#",
-  "#......P......#",
+  "#...........P.#",
   "###############",
 ];
 
@@ -51,7 +59,7 @@ const KEY_DIR = {
   S: "down",
   D: "right",
 };
-const MONSTER_COLORS = ["#e05a3c", "#3aa0d8", "#d8a13a"];
+const MONSTER_COLORS = ["#e05a3c", "#3aa0d8", "#d8a13a", "#7dce6a", "#c57bdb"];
 
 const canvas = document.getElementById("field");
 const ctx = canvas.getContext("2d");
@@ -64,6 +72,7 @@ const promptEl = document.getElementById("prompt");
 const optionsEl = document.getElementById("options");
 const filtersEl = document.getElementById("filters");
 const foundEl = document.getElementById("found");
+const shortfallEl = document.getElementById("shortfall");
 const sourceEl = document.getElementById("source");
 
 const keys = new Set();
@@ -98,10 +107,13 @@ function buildWorld() {
     id: enc.id,
     dimension: enc.dimension,
     prompt: enc.prompt,
-    options: enc.options,
+    options: enc.options.map((option) => ({ ...option })),
+    optionsByParent: enc.optionsByParent || null,
+    skipWhen: enc.skipWhen || null,
     row: avenueRows[index],
     monsters: [],
     selection: null,
+    skipped: false,
   }));
   let start = null;
   for (let r = 0; r < ROWS; r += 1) {
@@ -133,6 +145,7 @@ function buildWorld() {
     debris: [],
     query: "idle",
     games: null,
+    shortfall: null,
     queryError: "",
     wantOpen: false,
     crackStart: 0,
@@ -145,13 +158,17 @@ function heldEncounter() {
   return state.encounters.find((enc) => enc.id === state.held) || null;
 }
 
-function chosenCount() {
-  return state.encounters.filter((enc) => enc.selection).length;
+function requiredEncounters() {
+  return state.encounters.filter((enc) => !enc.skipped);
+}
+
+function readyForQuery() {
+  return state.encounters.every((enc) => enc.skipped || enc.selection);
 }
 
 function monsterAt(c, r) {
   for (const enc of state.encounters) {
-    if (enc.selection) continue;
+    if (enc.selection || enc.skipped) continue;
     if (enc.monsters.some((monster) => monster.c === c && monster.r === r)) return true;
   }
   return false;
@@ -188,7 +205,7 @@ function tryMove(dir) {
   state.player.c = c;
   state.player.r = r;
   state.facing = dir;
-  const enc = state.encounters.find((item) => item.row === r && !item.selection);
+  const enc = state.encounters.find((item) => item.row === r && !item.selection && !item.skipped);
   if (enc) {
     state.held = enc.id;
     state.message = "The monsters block the avenue. Pick one.";
@@ -204,7 +221,19 @@ function pick(index) {
   enc.monsters = [];
   state.held = null;
   state.message = `Added ${option.label}.`;
-  if (state.encounters.every((item) => item.selection)) {
+  if (enc.id === "recency") {
+    const fine = state.encounters.find((item) => item.id === "recency-fine");
+    if (option.id === "any") {
+      fine.skipped = true;
+      fine.monsters = [];
+      fine.selection = null;
+      state.message = "No recency clause. The next avenue stays open.";
+    } else if (fine.optionsByParent && fine.optionsByParent[option.id]) {
+      fine.skipped = false;
+      fine.options = fine.optionsByParent[option.id];
+    }
+  }
+  if (readyForQuery()) {
     state.message = "Every avenue added a filter. Dig up to the tile.";
     startQuery();
   }
@@ -213,10 +242,14 @@ function pick(index) {
 function startQuery() {
   const token = ++queryToken;
   const choices = {};
-  for (const enc of state.encounters) choices[enc.id] = enc.selection;
+  for (const enc of state.encounters) {
+    if (enc.skipped) continue;
+    choices[enc.id] = enc.selection;
+  }
   state.query = "loading";
   state.queryError = "";
   state.games = null;
+  state.shortfall = null;
   fetch("/api/discover", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -230,10 +263,8 @@ function startQuery() {
     .then((data) => {
       if (token !== queryToken) return;
       state.games = data.games || [];
+      state.shortfall = data.shortfall || null;
       state.query = "ready";
-      if (state.wantOpen && state.games.length < 3) {
-        state.message = "The query returned fewer than three games.";
-      }
     })
     .catch((err) => {
       if (token !== queryToken) return;
@@ -245,7 +276,7 @@ function startQuery() {
 
 function tryOpen() {
   if (!state || state.opened) return;
-  if (state.encounters.some((enc) => !enc.selection)) {
+  if (!readyForQuery()) {
     state.message = "The avenues still want an answer.";
     return;
   }
@@ -273,7 +304,7 @@ function fitText(text, max) {
   return `${cut}…`;
 }
 
-function drawTile(c, r, now) {
+function drawTile(c, r) {
   const x = c * TILE;
   const y = r * TILE;
   const tile = state.tiles[r][c];
@@ -289,15 +320,13 @@ function drawTile(c, r, now) {
     ctx.fillRect(x, y, TILE, TILE);
     ctx.fillStyle = "#5c3018";
     ctx.fillRect(x + 6, y + 8, 4, 3);
-    ctx.fillRect(x + 18, y + 18, 5, 3);
-    ctx.fillRect(x + 12, y + 22, 3, 3);
+    ctx.fillRect(x + 16, y + 16, 4, 3);
   } else if (tile === "s") {
     ctx.fillStyle = "#e0c36a";
     ctx.fillRect(x, y, TILE, TILE);
     ctx.fillStyle = "#c4a24e";
     ctx.fillRect(x + 5, y + 7, 3, 3);
-    ctx.fillRect(x + 16, y + 14, 3, 3);
-    ctx.fillRect(x + 10, y + 22, 3, 3);
+    ctx.fillRect(x + 16, y + 16, 3, 3);
   } else if (tile === "X") {
     ctx.fillStyle = "#1f6b4a";
     ctx.fillRect(x, y, TILE, TILE);
@@ -306,7 +335,7 @@ function drawTile(c, r, now) {
   }
 }
 
-function drawSlabLabel() {
+function slabBox() {
   let minC = COLS;
   let maxC = 0;
   let minR = ROWS;
@@ -320,38 +349,49 @@ function drawSlabLabel() {
       maxR = Math.max(maxR, r);
     }
   }
-  const x = minC * TILE;
-  const y = minR * TILE;
-  const w = (maxC - minC + 1) * TILE;
-  const h = (maxR - minR + 1) * TILE;
-  return { x, y, w, h };
+  return {
+    x: minC * TILE,
+    y: minR * TILE,
+    w: (maxC - minC + 1) * TILE,
+    h: (maxR - minR + 1) * TILE,
+  };
 }
 
 function drawDiscover(now) {
-  const box = drawSlabLabel();
-  if (state.opened && state.games) {
+  const box = slabBox();
+  if (state.opened) {
     ctx.fillStyle = "#07140f";
     ctx.fillRect(box.x, box.y, box.w, box.h);
     ctx.strokeStyle = "#e2b657";
     ctx.strokeRect(box.x + 3, box.y + 3, box.w - 6, box.h - 6);
-    const slot = (box.h - 16) / Math.max(state.games.length, 1);
-    state.games.forEach((game, index) => {
+    const games = state.games || [];
+    if (!games.length) {
+      ctx.fillStyle = "#f6ead7";
+      ctx.font = "700 14px Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      const note = state.shortfall ? state.shortfall.message : "The query returned no games.";
+      wrapText(note, box.x + box.w / 2, box.y + 36, box.w - 28, 18);
+      ctx.textAlign = "left";
+      return;
+    }
+    const slot = (box.h - 16) / games.length;
+    games.forEach((game, index) => {
       const gy = box.y + 8 + index * slot;
       ctx.fillStyle = "#143028";
       ctx.fillRect(box.x + 8, gy, box.w - 16, slot - 6);
       ctx.fillStyle = "#f6ead7";
-      ctx.font = "700 14px Segoe UI, sans-serif";
+      ctx.font = "700 13px Segoe UI, sans-serif";
       ctx.textAlign = "left";
-      ctx.fillText(fitText(`${index + 1}. ${game.title}`, box.w - 32), box.x + 16, gy + 20);
+      ctx.fillText(fitText(`${index + 1}. ${game.title}`, box.w - 32), box.x + 16, gy + 18);
       ctx.fillStyle = "#cbb89a";
-      ctx.font = "12px Segoe UI, sans-serif";
+      ctx.font = "11px Segoe UI, sans-serif";
       const meta = `${game.review_score} · ${game.released} · ${Number(game.total_reviews).toLocaleString()} reviews`;
-      ctx.fillText(fitText(meta, box.w - 32), box.x + 16, gy + 38);
+      ctx.fillText(fitText(meta, box.w - 32), box.x + 16, gy + 34);
     });
     return;
   }
   ctx.fillStyle = "#f6ead7";
-  ctx.font = "700 16px Segoe UI, sans-serif";
+  ctx.font = "700 15px Segoe UI, sans-serif";
   ctx.textAlign = "center";
   ctx.fillText("discover your", box.x + box.w / 2, box.y + box.h / 2 - 8);
   ctx.fillText("next games", box.x + box.w / 2, box.y + box.h / 2 + 14);
@@ -363,10 +403,25 @@ function drawDiscover(now) {
     ctx.moveTo(box.x + box.w * 0.2, box.y + 10);
     ctx.lineTo(box.x + box.w * (0.35 + crack * 0.2), box.y + box.h * 0.55);
     ctx.lineTo(box.x + box.w * 0.7, box.y + box.h - 12);
-    ctx.moveTo(box.x + box.w * 0.8, box.y + 16);
-    ctx.lineTo(box.x + box.w * 0.5, box.y + box.h * 0.7);
     ctx.stroke();
   }
+}
+
+function wrapText(text, x, y, max, lineHeight) {
+  const words = text.split(" ");
+  let line = "";
+  let yy = y;
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (ctx.measureText(next).width > max && line) {
+      ctx.fillText(line, x, yy);
+      line = word;
+      yy += lineHeight;
+    } else {
+      line = next;
+    }
+  }
+  if (line) ctx.fillText(line, x, yy);
 }
 
 function drawMonster(monster, color, now, asking) {
@@ -377,21 +432,21 @@ function drawMonster(monster, color, now, asking) {
     ctx.strokeStyle = "#e2b657";
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(x, y, 14, 0, Math.PI * 2);
+    ctx.arc(x, y, 13, 0, Math.PI * 2);
     ctx.stroke();
     ctx.lineWidth = 1;
   }
   ctx.fillStyle = color;
   ctx.beginPath();
-  ctx.arc(x, y, 11, 0, Math.PI * 2);
+  ctx.arc(x, y, 10, 0, Math.PI * 2);
   ctx.fill();
   ctx.fillStyle = "#1a100b";
-  ctx.fillRect(x - 6, y - 3, 3, 4);
-  ctx.fillRect(x + 2, y - 3, 3, 4);
+  ctx.fillRect(x - 5, y - 3, 3, 3);
+  ctx.fillRect(x + 2, y - 3, 3, 3);
   ctx.fillStyle = "#f6ead7";
-  ctx.font = "700 11px Segoe UI, sans-serif";
+  ctx.font = "700 10px Segoe UI, sans-serif";
   ctx.textAlign = "center";
-  ctx.fillText(String(monster.index + 1), x, y + 18);
+  ctx.fillText(String(monster.index + 1), x, y + 16);
   ctx.textAlign = "left";
 }
 
@@ -400,16 +455,16 @@ function drawPlayer() {
   const y = state.player.r * TILE + TILE / 2;
   ctx.fillStyle = "#f4f0e6";
   ctx.beginPath();
-  ctx.arc(x, y, 10, 0, Math.PI * 2);
+  ctx.arc(x, y, 9, 0, Math.PI * 2);
   ctx.fill();
   ctx.fillStyle = "#d64545";
-  ctx.fillRect(x - 10, y - 4, 20, 4);
+  ctx.fillRect(x - 9, y - 3, 18, 4);
   ctx.fillStyle = "#f4f0e6";
   const nose = {
-    up: [x, y - 16, x - 4, y - 6, x + 4, y - 6],
-    down: [x, y + 16, x - 4, y + 6, x + 4, y + 6],
-    left: [x - 16, y, x - 6, y - 4, x - 6, y + 4],
-    right: [x + 16, y, x + 6, y - 4, x + 6, y + 4],
+    up: [x, y - 14, x - 4, y - 5, x + 4, y - 5],
+    down: [x, y + 14, x - 4, y + 5, x + 4, y + 5],
+    left: [x - 14, y, x - 5, y - 4, x - 5, y + 4],
+    right: [x + 14, y, x + 5, y - 4, x + 5, y + 4],
   }[state.facing];
   ctx.beginPath();
   ctx.moveTo(nose[0], nose[1]);
@@ -424,16 +479,14 @@ function drawDebris(now) {
     const age = (now - bit.born) / 280;
     ctx.globalAlpha = 1 - age;
     ctx.fillStyle = bit.kind === "s" ? "#e0c36a" : "#7a4324";
-    ctx.fillRect(bit.c * TILE + 8, bit.r * TILE + 8 - age * 10, 6, 6);
-    ctx.fillRect(bit.c * TILE + 18, bit.r * TILE + 16 - age * 8, 5, 5);
+    ctx.fillRect(bit.c * TILE + 8, bit.r * TILE + 8 - age * 8, 5, 5);
     ctx.globalAlpha = 1;
   }
 }
 
 function draw(now) {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
   for (let r = 0; r < ROWS; r += 1) {
-    for (let c = 0; c < COLS; c += 1) drawTile(c, r, now);
+    for (let c = 0; c < COLS; c += 1) drawTile(c, r);
   }
   drawDiscover(now);
   drawDebris(now);
@@ -447,7 +500,7 @@ function draw(now) {
 }
 
 function appendClause(el, text) {
-  const parts = text.split(/(\d{4}-\d{2}-\d{2})/);
+  const parts = String(text).split(/(\d{4}-\d{2}-\d{2})/);
   for (const part of parts) {
     if (/^\d{4}-\d{2}-\d{2}$/.test(part)) {
       const date = document.createElement("span");
@@ -460,10 +513,22 @@ function appendClause(el, text) {
   }
 }
 
+function choiceLine(enc) {
+  const opt = enc.options.find((option) => option.id === enc.selection);
+  if (!opt) return null;
+  if (enc.id === "recency") {
+    const fine = state.encounters.find((item) => item.id === "recency-fine");
+    if (fine && fine.selection) {
+      return { label: opt.label, detail: "replaced by the next cut" };
+    }
+  }
+  return { label: opt.label, detail: opt.detail };
+}
+
 function renderPanel() {
-  const total = state.encounters.length;
-  const done = chosenCount();
-  progressEl.textContent = `Avenues ${done}/${total}`;
+  const required = requiredEncounters();
+  const done = required.filter((enc) => enc.selection).length;
+  progressEl.textContent = `Avenues ${done}/${required.length}`;
   messageEl.textContent = state.message;
   const enc = heldEncounter();
   if (enc) {
@@ -484,9 +549,9 @@ function renderPanel() {
       }),
     );
   } else if (state.opened) {
-    promptEl.textContent = "Three games from the query.";
+    promptEl.textContent = state.games && state.games.length ? "Games from the query." : "The query came up short.";
     optionsEl.replaceChildren();
-  } else if (done === total) {
+  } else if (readyForQuery()) {
     promptEl.textContent = "Click the discover tile.";
     optionsEl.replaceChildren();
   } else {
@@ -496,17 +561,19 @@ function renderPanel() {
 
   filtersEl.replaceChildren();
   for (const item of state.encounters) {
-    if (!item.selection) continue;
-    const opt = item.options.find((option) => option.id === item.selection);
-    const line = document.createElement("p");
-    line.className = "filter-line";
-    line.append(`${opt.label}: `);
-    appendClause(line, opt.detail);
-    filtersEl.append(line);
+    if (item.skipped || !item.selection) continue;
+    const line = choiceLine(item);
+    if (!line) continue;
+    const row = document.createElement("p");
+    row.className = "filter-line";
+    row.append(`${line.label}: `);
+    appendClause(row, line.detail);
+    filtersEl.append(row);
   }
 
   foundEl.replaceChildren();
-  if (state.opened && state.games) {
+  shortfallEl.textContent = state.opened && state.shortfall ? state.shortfall.message : "";
+  if (state.opened && state.games && state.games.length) {
     const heading = document.createElement("h2");
     heading.textContent = "Inside the tile";
     foundEl.append(heading);
@@ -526,18 +593,21 @@ function renderPanel() {
       foundEl.append(card);
     }
   }
-  sourceEl.textContent = "findGames on games and game_tags. The three games are the first rows of that query, drawn inside the broken tile and listed here.";
+  sourceEl.textContent = "findGames on games and game_tags. The games inside the tile are the first rows of that query.";
 }
 
 function signature() {
   return JSON.stringify({
     held: state.held,
     sels: state.encounters.map((enc) => enc.selection),
+    skipped: state.encounters.filter((enc) => enc.skipped).map((enc) => enc.id),
+    options: state.encounters.map((enc) => enc.options.map((opt) => opt.id).join("|")),
     message: state.message,
     query: state.query,
     opened: state.opened,
     wantOpen: state.wantOpen,
     games: (state.games || []).map((game) => game.app_id),
+    short: state.shortfall && state.shortfall.message,
   });
 }
 
@@ -546,10 +616,10 @@ function frame(now) {
     lastMove = now;
     tryMove(keys.values().next().value);
   }
-  if (state && state.wantOpen && !state.opened && state.query === "ready" && state.games && state.games.length >= 1) {
+  if (state && state.wantOpen && !state.opened && state.query === "ready" && Array.isArray(state.games)) {
     if (now - state.crackStart > 650) {
       state.opened = true;
-      state.message = "The tile broke open.";
+      state.message = state.shortfall ? state.shortfall.message : "The tile broke open.";
     }
   }
   if (state) {
@@ -576,7 +646,7 @@ window.addEventListener("keydown", (ev) => {
     keys.add(dir);
     return;
   }
-  if (ev.key === "1" || ev.key === "2" || ev.key === "3") {
+  if (ev.key >= "1" && ev.key <= "5") {
     ev.preventDefault();
     pick(Number(ev.key) - 1);
   }
@@ -609,6 +679,7 @@ window.__digdug = {
   },
   reset() {
     queryToken += 1;
+    keys.clear();
     buildWorld();
     renderPanel();
   },
@@ -626,8 +697,10 @@ window.__digdug = {
       adjacent: adjacentToDiscover(),
       dirt: state.tiles.flat().filter((tile) => tile === "d").length,
       sand: state.tiles.flat().filter((tile) => tile === "s").length,
+      skipped: state.encounters.filter((enc) => enc.skipped).map((enc) => enc.id),
       selections: Object.fromEntries(state.encounters.map((enc) => [enc.id, enc.selection])),
       games: state.games,
+      shortfall: state.shortfall,
       tile: state.tiles[state.player.r][state.player.c],
     };
   },

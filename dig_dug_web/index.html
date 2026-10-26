@@ -10,7 +10,7 @@
   <div id="app">
     <header>
       <h1>Dig Dug</h1>
-      <p>Knock dirt and sand out of the way. At each avenue, two or three monsters ask you to pick one filter. After the last avenue, click the discover tile. It breaks open onto three games.</p>
+      <p>Knock dirt and sand out of the way. Each avenue adds one filter to a single Find a Game search. Then click the discover tile. It breaks open onto three games.</p>
     </header>
     <div id="layout">
       <canvas id="field" tabindex="0" aria-label="Dig Dug field"></canvas>
@@ -22,8 +22,9 @@
         <h2 id="prompt">Loading the avenues…</h2>
         <div id="options"></div>
         <div id="filters"></div>
+        <p id="shortfall"></p>
         <div id="found"></div>
-        <p id="help">Arrow keys or WASD knock away dirt and sand. Number keys pick a monster’s option. Click the green tile once you have dug up to it.</p>
+        <p id="help">Arrow keys or WASD knock away dirt and sand. Number keys 1–5 pick a monster’s option. Click the green tile once you have dug up to it.</p>
         <p id="source"></p>
       </aside>
     </div>
