@@ -1,16 +1,30 @@
-const TILE = 40;
+const TILE = 32;
+const LETTERS = ["A", "B", "C", "H", "I", "J", "K"];
 const MAP = [
   "###############",
-  "#R#R#R#########",
-  "###############",
-  "#A.A.A........#",
-  "###############",
-  "#R#R#R#########",
-  "###############",
-  "#B.B.B........#",
-  "#R#R#R#########",
-  "###############",
+  "#XXXXXXXXXXXXX#",
+  "#XXXXXXXXXXXXX#",
+  "#XXXXXXXXXXXXX#",
+  "#XXXXXXXXXXXXX#",
+  "#XXXXXXXXXXXXX#",
+  "#XXXXXXXXXXXXX#",
+  "#sssssssssssss#",
+  "#ddddddddddddd#",
+  "#K.K..........#",
+  "#sssssssssssss#",
+  "#J.J..........#",
+  "#ddddddddddddd#",
+  "#I.I..........#",
+  "#sssssssssssss#",
+  "#H.H..........#",
+  "#ddddddddddddd#",
   "#C.C.C........#",
+  "#sssssssssssss#",
+  "#B.B.B........#",
+  "#ddddddddddddd#",
+  "#A.A.A........#",
+  "#sssssssssssss#",
+  "#ddddddddddddd#",
   "#......P......#",
   "###############",
 ];
@@ -23,20 +37,32 @@ const DIRS = {
   left: { c: -1, r: 0 },
   right: { c: 1, r: 0 },
 };
-const LETTERS = ["A", "B", "C"];
+const KEY_DIR = {
+  ArrowUp: "up",
+  ArrowDown: "down",
+  ArrowLeft: "left",
+  ArrowRight: "right",
+  w: "up",
+  a: "left",
+  s: "down",
+  d: "right",
+  W: "up",
+  A: "left",
+  S: "down",
+  D: "right",
+};
+const MONSTER_COLORS = ["#e05a3c", "#3aa0d8", "#d8a13a"];
 
 const canvas = document.getElementById("field");
 const ctx = canvas.getContext("2d");
 canvas.width = COLS * TILE;
 canvas.height = ROWS * TILE;
 
-const scoreEl = document.getElementById("score");
-const livesEl = document.getElementById("lives");
-const leftEl = document.getElementById("left");
+const progressEl = document.getElementById("progress");
 const messageEl = document.getElementById("message");
 const promptEl = document.getElementById("prompt");
 const optionsEl = document.getElementById("options");
-const meterEl = document.getElementById("meter");
+const filtersEl = document.getElementById("filters");
 const foundEl = document.getElementById("found");
 const sourceEl = document.getElementById("source");
 
@@ -45,626 +71,581 @@ let blueprint = null;
 let state = null;
 let panelSig = "";
 let lastMove = 0;
-let lastPump = 0;
-let lastPatrol = 0;
-let loopId = 0;
+let queryToken = 0;
 
 function fail(text) {
   promptEl.textContent = text;
   optionsEl.textContent = "";
 }
 
-function cloneEncounters(data) {
-  return data.encounters.map((enc) => ({
-    id: enc.id,
-    dimension: enc.dimension,
-    prompt: enc.prompt,
-    options: enc.options,
-    monsters: [],
-    row: 0,
-    resolved: false,
-    selection: null,
-    inflate: 0,
-    deflateAt: 0,
-    via: null,
-  }));
+function inBounds(c, r) {
+  return c >= 0 && r >= 0 && c < COLS && r < ROWS;
 }
 
 function buildWorld() {
   for (const row of MAP) {
     if (row.length !== COLS) throw new Error("map row length mismatch");
   }
-  const tiles = [];
-  const rocks = [];
-  const spawns = { A: [], B: [], C: [] };
-  let start = { c: 1, r: 1 };
+  const avenueRows = [];
+  for (let r = ROWS - 1; r >= 0; r -= 1) {
+    if ([...MAP[r]].some((ch) => LETTERS.includes(ch))) avenueRows.push(r);
+  }
+  if (!blueprint || avenueRows.length !== blueprint.encounters.length) {
+    throw new Error("avenue count does not match the query");
+  }
+  const tiles = MAP.map((row) => row.split(""));
+  const encounters = blueprint.encounters.map((enc, index) => ({
+    id: enc.id,
+    dimension: enc.dimension,
+    prompt: enc.prompt,
+    options: enc.options,
+    row: avenueRows[index],
+    monsters: [],
+    selection: null,
+  }));
+  let start = null;
   for (let r = 0; r < ROWS; r += 1) {
-    tiles[r] = [];
     for (let c = 0; c < COLS; c += 1) {
-      const ch = MAP[r][c];
-      const border = r === 0 || c === 0 || r === ROWS - 1 || c === COLS - 1;
-      if (ch === "R" && !border) {
-        tiles[r][c] = "dirt";
-        rocks.push({ c, r, state: "idle", timer: 0, fell: false });
-        continue;
+      const ch = tiles[r][c];
+      if (ch === "P") {
+        start = { c, r };
+        tiles[r][c] = ".";
+      } else if (LETTERS.includes(ch)) {
+        const enc = encounters.find((item) => item.row === r);
+        enc.monsters.push({ c, r, index: enc.monsters.length });
+        tiles[r][c] = ".";
       }
-      if ((ch === "A" || ch === "B" || ch === "C") && !border) {
-        tiles[r][c] = "tunnel";
-        spawns[ch].push({ c, r });
-        continue;
-      }
-      if (ch === "." || ch === "P") {
-        tiles[r][c] = border ? "wall" : "tunnel";
-        if (ch === "P") start = { c, r };
-        continue;
-      }
-      tiles[r][c] = border ? "wall" : "dirt";
     }
   }
-  const encounters = cloneEncounters(blueprint);
-  encounters.forEach((enc, index) => {
-    const slots = spawns[LETTERS[index]] || [];
-    if (slots.length < enc.options.length) {
-      throw new Error(`not enough tunnels for ${enc.dimension}`);
+  if (!start) throw new Error("map has no start");
+  for (const enc of encounters) {
+    if (enc.monsters.length !== enc.options.length) {
+      throw new Error(`${enc.id} monster count does not match its options`);
     }
-    enc.row = slots[0].r;
-    enc.monsters = enc.options.map((option, optionIndex) => ({
-      c: slots[optionIndex].c,
-      r: slots[optionIndex].r,
-      home: slots[optionIndex].c,
-      dir: optionIndex % 2 === 0 ? 1 : -1,
-      alive: true,
-      optionIndex,
-    }));
-  });
-  for (const rock of rocks) {
-    const below = tiles[rock.r + 1] && tiles[rock.r + 1][rock.c];
-    const supported = below === "dirt" || below === "wall" || rocks.some((other) => other !== rock && other.c === rock.c && other.r === rock.r + 1);
-    if (!supported) throw new Error(`rock at ${rock.c},${rock.r} starts in the air`);
   }
-  return {
+  state = {
     tiles,
-    rocks,
     encounters,
-    player: { c: start.c, r: start.r, dir: "up", invulnUntil: 0 },
-    score: 0,
-    lives: 3,
-    status: "play",
-    message: "",
-    messageUntil: 0,
-    log: [],
-    particles: [],
-    floats: [],
-    shake: 0,
+    player: { c: start.c, r: start.r },
+    facing: "up",
+    held: null,
+    message: "Dig up to the first avenue.",
+    debris: [],
+    query: "idle",
+    games: null,
+    queryError: "",
+    wantOpen: false,
+    crackStart: 0,
+    opened: false,
   };
+  panelSig = "";
 }
 
-function say(text, now) {
-  state.message = text;
-  state.messageUntil = now + 2200;
+function heldEncounter() {
+  return state.encounters.find((enc) => enc.id === state.held) || null;
 }
 
-function tileAt(c, r) {
-  if (r < 0 || c < 0 || r >= ROWS || c >= COLS) return "wall";
-  return state.tiles[r][c];
-}
-
-function rockAt(c, r) {
-  return state.rocks.find((rock) => rock.c === c && rock.r === r) || null;
+function chosenCount() {
+  return state.encounters.filter((enc) => enc.selection).length;
 }
 
 function monsterAt(c, r) {
   for (const enc of state.encounters) {
-    for (const monster of enc.monsters) {
-      if (monster.alive && monster.c === c && monster.r === r) return { enc, monster };
+    if (enc.selection) continue;
+    if (enc.monsters.some((monster) => monster.c === c && monster.r === r)) return true;
+  }
+  return false;
+}
+
+function adjacentToDiscover() {
+  const { c, r } = state.player;
+  for (let rr = 0; rr < ROWS; rr += 1) {
+    for (let cc = 0; cc < COLS; cc += 1) {
+      if (state.tiles[rr][cc] !== "X") continue;
+      if (Math.abs(cc - c) + Math.abs(rr - r) === 1) return true;
     }
   }
-  return null;
+  return false;
 }
 
-function encounterOnRow(r) {
-  return state.encounters.find((enc) => !enc.resolved && enc.row === r) || null;
+function puff(c, r, kind) {
+  state.debris.push({ c, r, kind, born: performance.now() });
 }
 
-function hurt(now, reason, respawn) {
-  if (now < state.player.invulnUntil || state.status !== "play") return;
-  state.lives -= 1;
-  state.shake = 10;
-  say(reason, now);
-  if (state.lives <= 0) {
-    state.status = "dead";
-    return;
+function tryMove(dir) {
+  if (!state || state.held || state.opened) return;
+  const step = DIRS[dir];
+  const c = state.player.c + step.c;
+  const r = state.player.r + step.r;
+  if (!inBounds(c, r)) return;
+  const tile = state.tiles[r][c];
+  if (tile === "#" || tile === "X") return;
+  if (monsterAt(c, r)) return;
+  if (tile === "d" || tile === "s") {
+    state.tiles[r][c] = ".";
+    puff(c, r, tile);
   }
-  state.player.invulnUntil = now + 1500;
-  if (respawn) {
-    const home = spawnCell();
-    state.player.c = home.c;
-    state.player.r = home.r;
-  }
-}
-
-function spawnCell() {
-  const row = MAP.findIndex((line) => line.includes("P"));
-  const preferred = Math.max(MAP[row].indexOf("P"), 1);
-  const order = [preferred, ...Array.from({ length: COLS }, (_, index) => index)];
-  for (const c of order) {
-    if (tileAt(c, row) === "tunnel" && !rockAt(c, row)) return { c, r: row };
-  }
-  return { c: preferred, r: row };
-}
-
-function tryMove(dirName, now) {
-  if (state.status !== "play") return;
-  const dir = DIRS[dirName];
-  state.player.dir = dirName;
-  const c = state.player.c + dir.c;
-  const r = state.player.r + dir.r;
-  if (rockAt(c, r)) return;
-  const asking = encounterOnRow(state.player.r);
-  if (monsterAt(c, r)) {
-    if (!asking) hurt(now, "The monsters got you.", false);
-    return;
-  }
-  const tile = tileAt(c, r);
-  if (tile === "wall") return;
-  if (tile === "dirt") {
-    state.tiles[r][c] = "tunnel";
-    state.score += 10;
-    state.floats.push({ text: "+10", c, r, life: 1 });
-  }
-  if (tileAt(c, r) !== "tunnel") return;
   state.player.c = c;
   state.player.r = r;
-}
-
-function dirFromKeys() {
-  if (keys.has("arrowup") || keys.has("w")) return "up";
-  if (keys.has("arrowdown") || keys.has("s")) return "down";
-  if (keys.has("arrowleft") || keys.has("a")) return "left";
-  if (keys.has("arrowright") || keys.has("d")) return "right";
-  return null;
-}
-
-function choose(index) {
-  if (!state || state.status !== "play") return;
-  const enc = encounterOnRow(state.player.r);
-  if (!enc || index < 1 || index > enc.options.length) return;
-  enc.selection = index - 1;
-  enc.deflateAt = performance.now() + 900;
-  renderPanel(true);
-}
-
-function pump(now) {
-  const enc = encounterOnRow(state.player.r);
-  if (!enc) return;
-  if (enc.selection === null) {
-    say("Press a number to choose, then pump.", now);
-    return;
+  state.facing = dir;
+  const enc = state.encounters.find((item) => item.row === r && !item.selection);
+  if (enc) {
+    state.held = enc.id;
+    state.message = "The monsters block the avenue. Pick one.";
   }
-  const chosen = enc.monsters.find((monster) => monster.alive && monster.optionIndex === enc.selection);
-  if (!chosen) {
-    say("That one is already buried. Pick another.", now);
-    return;
-  }
-  enc.inflate = Math.min(3, enc.inflate + 1);
-  enc.deflateAt = now + 900;
-  if (enc.inflate >= 3) resolveEncounter(enc, enc.selection, "pump", now);
 }
 
-function resolveEncounter(enc, optionIndex, via, now) {
-  if (enc.resolved || state.status !== "play") return;
-  const option = enc.options[optionIndex];
+function pick(index) {
+  const enc = heldEncounter();
+  if (!enc || enc.selection) return;
+  const option = enc.options[index];
   if (!option) return;
-  enc.resolved = true;
-  enc.via = via;
-  enc.inflate = 0;
-  const points = via === "crush" ? 1000 : 500;
-  state.score += points;
-  for (const monster of enc.monsters) {
-    if (monster.alive) burst(monster.c, monster.r, via === "crush" ? "#d0d4da" : "#e07a3d");
-    monster.alive = false;
+  enc.selection = option.id;
+  enc.monsters = [];
+  state.held = null;
+  state.message = `Added ${option.label}.`;
+  if (state.encounters.every((item) => item.selection)) {
+    state.message = "Every avenue added a filter. Dig up to the tile.";
+    startQuery();
   }
-  state.floats.push({ text: `+${points}`, c: state.player.c, r: state.player.r, life: 1 });
-  state.log.push({
-    dimension: enc.dimension,
-    prompt: enc.prompt,
-    label: option.label,
-    games: option.games,
-    via,
-  });
-  say(via === "crush" ? `The rock chose ${option.label}.` : `Pumped: ${option.label}.`, now);
-  if (state.encounters.every((item) => item.resolved)) {
-    state.score += 2000;
-    state.status = "win";
-    state.floats.push({ text: "+2000", c: state.player.c, r: state.player.r, life: 1.4 });
-  }
-  renderPanel(true);
 }
 
-function burst(c, r, color) {
-  for (let i = 0; i < 8; i += 1) {
-    state.particles.push({
-      x: c * TILE + TILE / 2,
-      y: r * TILE + TILE / 2,
-      vx: (Math.random() - 0.5) * 80,
-      vy: (Math.random() - 0.5) * 80,
-      life: 0.6,
-      color,
+function startQuery() {
+  const token = ++queryToken;
+  const choices = {};
+  for (const enc of state.encounters) choices[enc.id] = enc.selection;
+  state.query = "loading";
+  state.queryError = "";
+  state.games = null;
+  fetch("/api/discover", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ choices }),
+  })
+    .then(async (res) => {
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "The query failed.");
+      return data;
+    })
+    .then((data) => {
+      if (token !== queryToken) return;
+      state.games = data.games || [];
+      state.query = "ready";
+      if (state.wantOpen && state.games.length < 3) {
+        state.message = "The query returned fewer than three games.";
+      }
+    })
+    .catch((err) => {
+      if (token !== queryToken) return;
+      state.query = "error";
+      state.queryError = err.message || "The query failed.";
+      state.message = state.queryError;
     });
-  }
 }
 
-function rockComingDown(monster) {
-  return state.rocks.some((rock) => rock.c === monster.home && rock.r < monster.r && rock.state !== "idle");
+function tryOpen() {
+  if (!state || state.opened) return;
+  if (state.encounters.some((enc) => !enc.selection)) {
+    state.message = "The avenues still want an answer.";
+    return;
+  }
+  if (!adjacentToDiscover()) {
+    state.message = "Dig up next to the tile, then click it.";
+    return;
+  }
+  state.wantOpen = true;
+  if (!state.crackStart) state.crackStart = performance.now();
+  state.message = state.query === "ready" ? "The tile is cracking." : "The tile is cracking. The query is still running.";
+  if (state.query === "error") startQuery();
 }
 
-function patrol(now) {
-  if (now - lastPatrol < 650) return;
-  lastPatrol = now;
-  for (const enc of state.encounters) {
-    if (enc.resolved || state.player.r === enc.row) continue;
-    for (const monster of enc.monsters) {
-      if (!monster.alive || rockComingDown(monster)) continue;
-      const next = monster.c + monster.dir;
-      const blocked = next < monster.home - 1
-        || next > monster.home + 1
-        || tileAt(next, monster.r) !== "tunnel"
-        || rockAt(next, monster.r)
-        || monsterAt(next, monster.r);
-      if (blocked) monster.dir *= -1;
-      else monster.c = next;
-    }
-  }
+function cellFromEvent(ev) {
+  const rect = canvas.getBoundingClientRect();
+  const x = (ev.clientX - rect.left) * (canvas.width / rect.width);
+  const y = (ev.clientY - rect.top) * (canvas.height / rect.height);
+  return { c: Math.floor(x / TILE), r: Math.floor(y / TILE) };
 }
 
-function updateRocks(now) {
-  const ordered = state.rocks.slice().sort((a, b) => b.r - a.r);
-  for (const rock of ordered) {
-    const supported = supportUnder(rock);
-    if (rock.state === "idle") {
-      if (!supported) {
-        rock.state = "wobble";
-        rock.timer = now + 480;
-      }
-      continue;
-    }
-    if (rock.state === "wobble") {
-      if (supported) rock.state = "idle";
-      else if (now >= rock.timer) rock.state = "fall";
-      continue;
-    }
-    if (now < rock.timer) continue;
-    rock.timer = now + 110;
-    if (supported) {
-      rock.state = "idle";
-      continue;
-    }
-    const destR = rock.r + 1;
-    const playerThere = state.player.c === rock.c && state.player.r === destR;
-    const hit = monsterAt(rock.c, destR);
-    state.tiles[rock.r][rock.c] = "tunnel";
-    rock.r = destR;
-    rock.fell = true;
-    state.shake = 6;
-    if (playerThere) hurt(now, "A rock flattened you.", true);
-    if (hit && hit.monster.alive && !hit.enc.resolved) {
-      burst(rock.c, rock.r, "#d0d4da");
-      resolveEncounter(hit.enc, hit.monster.optionIndex, "crush", now);
-    }
-  }
+function fitText(text, max) {
+  if (ctx.measureText(text).width <= max) return text;
+  let cut = text;
+  while (cut.length > 1 && ctx.measureText(`${cut}…`).width > max) cut = cut.slice(0, -1);
+  return `${cut}…`;
 }
 
-function supportUnder(rock) {
-  const below = tileAt(rock.c, rock.r + 1);
-  if (below === "dirt" || below === "wall") return true;
-  return state.rocks.some((other) => other !== rock && other.c === rock.c && other.r === rock.r + 1);
-}
-
-function deflate(now) {
-  for (const enc of state.encounters) {
-    if (enc.resolved || enc.inflate <= 0 || now < enc.deflateAt) continue;
-    enc.inflate -= 1;
-    enc.deflateAt = now + 380;
-  }
-}
-
-function tick(now) {
-  if (state.status === "play") {
-    if (now - lastMove >= 145) {
-      const dir = dirFromKeys();
-      if (dir) {
-        tryMove(dir, now);
-        lastMove = now;
-      }
-    }
-    if (keys.has(" ") && now - lastPump >= 240) {
-      pump(now);
-      lastPump = now;
-    }
-    updateRocks(now);
-    patrol(now);
-    deflate(now);
-  }
-  for (const particle of state.particles) {
-    particle.life -= 0.016;
-    particle.x += particle.vx * 0.016;
-    particle.y += particle.vy * 0.016;
-  }
-  state.particles = state.particles.filter((particle) => particle.life > 0);
-  for (const item of state.floats) item.life -= 0.016;
-  state.floats = state.floats.filter((item) => item.life > 0);
-  if (state.shake > 0) state.shake -= 1;
-  if (state.message && now > state.messageUntil) state.message = "";
-  draw(now);
-  renderPanel(false);
-  loopId = requestAnimationFrame(tick);
-}
-
-function draw(now) {
-  const shakeX = state.shake ? (Math.random() - 0.5) * state.shake : 0;
-  const shakeY = state.shake ? (Math.random() - 0.5) * state.shake : 0;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.save();
-  ctx.translate(shakeX, shakeY);
-  for (let r = 0; r < ROWS; r += 1) {
-    for (let c = 0; c < COLS; c += 1) drawTile(c, r);
-  }
-  for (const rock of state.rocks) drawRock(rock, now);
-  for (const enc of state.encounters) {
-    const asking = !enc.resolved && state.player.r === enc.row;
-    for (const monster of enc.monsters) {
-      if (!monster.alive) continue;
-      drawMonster(monster, enc, asking, now);
-    }
-  }
-  drawPlayer(now);
-  for (const particle of state.particles) {
-    ctx.globalAlpha = Math.max(particle.life, 0);
-    ctx.fillStyle = particle.color;
-    ctx.fillRect(particle.x, particle.y, 4, 4);
-    ctx.globalAlpha = 1;
-  }
-  ctx.fillStyle = "#f2d48a";
-  ctx.font = "bold 14px sans-serif";
-  for (const item of state.floats) {
-    ctx.globalAlpha = Math.max(item.life, 0);
-    ctx.fillText(item.text, item.c * TILE + 8, item.r * TILE + 16 - (1 - item.life) * 16);
-  }
-  ctx.globalAlpha = 1;
-  if (state.status !== "play") {
-    ctx.fillStyle = "rgba(8, 5, 3, 0.72)";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = "#f6ead7";
-    ctx.font = "bold 28px sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText(state.status === "win" ? "Level clear" : "Game over", canvas.width / 2, canvas.height / 2 - 8);
-    ctx.font = "16px sans-serif";
-    ctx.fillText("Press R to dig again", canvas.width / 2, canvas.height / 2 + 22);
-    ctx.textAlign = "left";
-  }
-  ctx.restore();
-}
-
-function drawTile(c, r) {
-  const tile = state.tiles[r][c];
+function drawTile(c, r, now) {
   const x = c * TILE;
   const y = r * TILE;
-  if (tile === "tunnel") {
-    ctx.fillStyle = "#1a120c";
-    ctx.fillRect(x, y, TILE, TILE);
-    return;
-  }
-  if (tile === "wall") {
-    ctx.fillStyle = "#2c241c";
-    ctx.fillRect(x, y, TILE, TILE);
-    ctx.strokeStyle = "#3d342a";
-    ctx.strokeRect(x + 0.5, y + 0.5, TILE - 1, TILE - 1);
-    return;
-  }
-  const shades = ["#6e4124", "#7d4c2b", "#8b5733", "#734626"];
-  ctx.fillStyle = shades[(c * 5 + r * 3) % shades.length];
+  const tile = state.tiles[r][c];
+  ctx.fillStyle = "#120c08";
   ctx.fillRect(x, y, TILE, TILE);
-  ctx.fillStyle = "rgba(0,0,0,0.18)";
-  ctx.fillRect(x + ((c * 13 + r) % 18), y + ((r * 11 + c) % 20), 3, 2);
+  if (tile === "#") {
+    ctx.fillStyle = "#2c1d12";
+    ctx.fillRect(x, y, TILE, TILE);
+    ctx.fillStyle = "#3d2918";
+    ctx.fillRect(x, y, TILE, 3);
+  } else if (tile === "d") {
+    ctx.fillStyle = "#7a4324";
+    ctx.fillRect(x, y, TILE, TILE);
+    ctx.fillStyle = "#5c3018";
+    ctx.fillRect(x + 6, y + 8, 4, 3);
+    ctx.fillRect(x + 18, y + 18, 5, 3);
+    ctx.fillRect(x + 12, y + 22, 3, 3);
+  } else if (tile === "s") {
+    ctx.fillStyle = "#e0c36a";
+    ctx.fillRect(x, y, TILE, TILE);
+    ctx.fillStyle = "#c4a24e";
+    ctx.fillRect(x + 5, y + 7, 3, 3);
+    ctx.fillRect(x + 16, y + 14, 3, 3);
+    ctx.fillRect(x + 10, y + 22, 3, 3);
+  } else if (tile === "X") {
+    ctx.fillStyle = "#1f6b4a";
+    ctx.fillRect(x, y, TILE, TILE);
+    ctx.strokeStyle = "#d7c07a";
+    ctx.strokeRect(x + 2, y + 2, TILE - 4, TILE - 4);
+  }
 }
 
-function drawRock(rock, now) {
-  const wobble = rock.state === "wobble" ? Math.sin(now / 40) * 3 : 0;
-  const x = rock.c * TILE + TILE / 2 + wobble;
-  const y = rock.r * TILE + TILE / 2;
-  ctx.fillStyle = "#b7bdc4";
-  ctx.beginPath();
-  ctx.arc(x, y, 14, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#eceff3";
-  ctx.beginPath();
-  ctx.arc(x - 4, y - 4, 4, 0, Math.PI * 2);
-  ctx.fill();
+function drawSlabLabel() {
+  let minC = COLS;
+  let maxC = 0;
+  let minR = ROWS;
+  let maxR = 0;
+  for (let r = 0; r < ROWS; r += 1) {
+    for (let c = 0; c < COLS; c += 1) {
+      if (state.tiles[r][c] !== "X") continue;
+      minC = Math.min(minC, c);
+      maxC = Math.max(maxC, c);
+      minR = Math.min(minR, r);
+      maxR = Math.max(maxR, r);
+    }
+  }
+  const x = minC * TILE;
+  const y = minR * TILE;
+  const w = (maxC - minC + 1) * TILE;
+  const h = (maxR - minR + 1) * TILE;
+  return { x, y, w, h };
 }
 
-function drawMonster(monster, enc, asking, now) {
-  const selected = enc.selection === monster.optionIndex;
-  const scale = selected ? 1 + enc.inflate * 0.22 : 1;
-  const bob = asking ? Math.sin(now / 180 + monster.optionIndex) * 2 : 0;
-  const x = monster.c * TILE + TILE / 2;
-  const y = monster.r * TILE + TILE / 2 + bob;
-  const colors = ["#e07a3d", "#d24b4b", "#7e9b4a"];
-  ctx.fillStyle = colors[monster.optionIndex % colors.length];
-  ctx.beginPath();
-  ctx.arc(x, y, 12 * scale, 0, Math.PI * 2);
-  ctx.fill();
-  if (selected) {
-    ctx.strokeStyle = "#f2d48a";
-    ctx.lineWidth = 2;
+function drawDiscover(now) {
+  const box = drawSlabLabel();
+  if (state.opened && state.games) {
+    ctx.fillStyle = "#07140f";
+    ctx.fillRect(box.x, box.y, box.w, box.h);
+    ctx.strokeStyle = "#e2b657";
+    ctx.strokeRect(box.x + 3, box.y + 3, box.w - 6, box.h - 6);
+    const slot = (box.h - 16) / Math.max(state.games.length, 1);
+    state.games.forEach((game, index) => {
+      const gy = box.y + 8 + index * slot;
+      ctx.fillStyle = "#143028";
+      ctx.fillRect(box.x + 8, gy, box.w - 16, slot - 6);
+      ctx.fillStyle = "#f6ead7";
+      ctx.font = "700 14px Segoe UI, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(fitText(`${index + 1}. ${game.title}`, box.w - 32), box.x + 16, gy + 20);
+      ctx.fillStyle = "#cbb89a";
+      ctx.font = "12px Segoe UI, sans-serif";
+      const meta = `${game.review_score} · ${game.released} · ${Number(game.total_reviews).toLocaleString()} reviews`;
+      ctx.fillText(fitText(meta, box.w - 32), box.x + 16, gy + 38);
+    });
+    return;
+  }
+  ctx.fillStyle = "#f6ead7";
+  ctx.font = "700 16px Segoe UI, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("discover your", box.x + box.w / 2, box.y + box.h / 2 - 8);
+  ctx.fillText("next games", box.x + box.w / 2, box.y + box.h / 2 + 14);
+  ctx.textAlign = "left";
+  if (state.wantOpen) {
+    ctx.strokeStyle = "#f0d48a";
+    ctx.beginPath();
+    const crack = ((now - state.crackStart) / 650) % 1;
+    ctx.moveTo(box.x + box.w * 0.2, box.y + 10);
+    ctx.lineTo(box.x + box.w * (0.35 + crack * 0.2), box.y + box.h * 0.55);
+    ctx.lineTo(box.x + box.w * 0.7, box.y + box.h - 12);
+    ctx.moveTo(box.x + box.w * 0.8, box.y + 16);
+    ctx.lineTo(box.x + box.w * 0.5, box.y + box.h * 0.7);
     ctx.stroke();
   }
-  ctx.fillStyle = "#1a120c";
-  ctx.font = "bold 14px sans-serif";
-  ctx.textAlign = "center";
-  ctx.fillText(String(monster.optionIndex + 1), x, y + 5);
-  ctx.textAlign = "left";
 }
 
-function drawPlayer(now) {
-  const blink = now < state.player.invulnUntil && Math.floor(now / 120) % 2 === 0;
-  if (blink) return;
-  const x = state.player.c * TILE + TILE / 2;
-  const y = state.player.r * TILE + TILE / 2;
-  ctx.fillStyle = "#f2c14e";
+function drawMonster(monster, color, now, asking) {
+  const bob = asking ? Math.sin(now / 160) * 2 : 0;
+  const x = monster.c * TILE + TILE / 2;
+  const y = monster.r * TILE + TILE / 2 + bob;
+  if (asking) {
+    ctx.strokeStyle = "#e2b657";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x, y, 14, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+  ctx.fillStyle = color;
   ctx.beginPath();
   ctx.arc(x, y, 11, 0, Math.PI * 2);
   ctx.fill();
-  const dir = DIRS[state.player.dir];
-  ctx.strokeStyle = "#f6ead7";
-  ctx.lineWidth = 3;
+  ctx.fillStyle = "#1a100b";
+  ctx.fillRect(x - 6, y - 3, 3, 4);
+  ctx.fillRect(x + 2, y - 3, 3, 4);
+  ctx.fillStyle = "#f6ead7";
+  ctx.font = "700 11px Segoe UI, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(String(monster.index + 1), x, y + 18);
+  ctx.textAlign = "left";
+}
+
+function drawPlayer() {
+  const x = state.player.c * TILE + TILE / 2;
+  const y = state.player.r * TILE + TILE / 2;
+  ctx.fillStyle = "#f4f0e6";
   ctx.beginPath();
-  ctx.moveTo(x, y);
-  ctx.lineTo(x + dir.c * 16, y + dir.r * 16);
-  ctx.stroke();
+  ctx.arc(x, y, 10, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#d64545";
+  ctx.fillRect(x - 10, y - 4, 20, 4);
+  ctx.fillStyle = "#f4f0e6";
+  const nose = {
+    up: [x, y - 16, x - 4, y - 6, x + 4, y - 6],
+    down: [x, y + 16, x - 4, y + 6, x + 4, y + 6],
+    left: [x - 16, y, x - 6, y - 4, x - 6, y + 4],
+    right: [x + 16, y, x + 6, y - 4, x + 6, y + 4],
+  }[state.facing];
+  ctx.beginPath();
+  ctx.moveTo(nose[0], nose[1]);
+  ctx.lineTo(nose[2], nose[3]);
+  ctx.lineTo(nose[4], nose[5]);
+  ctx.fill();
 }
 
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
+function drawDebris(now) {
+  state.debris = state.debris.filter((bit) => now - bit.born < 280);
+  for (const bit of state.debris) {
+    const age = (now - bit.born) / 280;
+    ctx.globalAlpha = 1 - age;
+    ctx.fillStyle = bit.kind === "s" ? "#e0c36a" : "#7a4324";
+    ctx.fillRect(bit.c * TILE + 8, bit.r * TILE + 8 - age * 10, 6, 6);
+    ctx.fillRect(bit.c * TILE + 18, bit.r * TILE + 16 - age * 8, 5, 5);
+    ctx.globalAlpha = 1;
+  }
 }
 
-function renderPanel(force) {
-  const asking = state.status === "play" ? encounterOnRow(state.player.r) : null;
-  const sig = JSON.stringify({
-    score: state.score,
-    lives: state.lives,
-    status: state.status,
-    message: state.message,
-    ask: asking ? asking.id : null,
-    selection: asking ? asking.selection : null,
-    inflate: asking ? asking.inflate : 0,
-    log: state.log.map((entry) => entry.label),
-    left: state.encounters.filter((enc) => !enc.resolved).length,
-  });
-  if (!force && sig === panelSig) return;
-  panelSig = sig;
-  scoreEl.textContent = `Score ${state.score}`;
-  livesEl.textContent = `Lives ${state.lives}`;
-  leftEl.textContent = `Packs left ${state.encounters.filter((enc) => !enc.resolved).length}`;
-  messageEl.textContent = state.message || "";
-  optionsEl.textContent = "";
-  meterEl.textContent = "";
-  if (state.status === "win") {
-    promptEl.textContent = "Level clear. Every pack got an answer.";
-  } else if (state.status === "dead") {
-    promptEl.textContent = "Out of lives.";
-  } else if (asking) {
-    promptEl.textContent = asking.prompt;
-    asking.options.forEach((option, index) => {
-      const button = el("button", asking.selection === index ? "opt selected" : "opt");
-      button.type = "button";
-      button.append(el("strong", null, `${index + 1}. ${option.label}`));
-      button.append(el("span", null, option.detail));
-      button.addEventListener("click", () => choose(index + 1));
-      optionsEl.append(button);
-    });
-    if (asking.selection !== null) {
-      meterEl.textContent = `Pump ${asking.inflate}/3`;
+function draw(now) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  for (let r = 0; r < ROWS; r += 1) {
+    for (let c = 0; c < COLS; c += 1) drawTile(c, r, now);
+  }
+  drawDiscover(now);
+  drawDebris(now);
+  for (const enc of state.encounters) {
+    const asking = enc.id === state.held;
+    for (const monster of enc.monsters) {
+      drawMonster(monster, MONSTER_COLORS[monster.index % MONSTER_COLORS.length], now, asking);
     }
+  }
+  drawPlayer();
+}
+
+function appendClause(el, text) {
+  const parts = text.split(/(\d{4}-\d{2}-\d{2})/);
+  for (const part of parts) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(part)) {
+      const date = document.createElement("span");
+      date.style.whiteSpace = "nowrap";
+      date.textContent = part;
+      el.append(date);
+    } else {
+      el.append(document.createTextNode(part));
+    }
+  }
+}
+
+function renderPanel() {
+  const total = state.encounters.length;
+  const done = chosenCount();
+  progressEl.textContent = `Avenues ${done}/${total}`;
+  messageEl.textContent = state.message;
+  const enc = heldEncounter();
+  if (enc) {
+    promptEl.textContent = enc.prompt;
+    optionsEl.replaceChildren(
+      ...enc.options.map((opt, index) => {
+        const btn = document.createElement("button");
+        btn.className = "opt";
+        btn.type = "button";
+        btn.style.borderLeft = `6px solid ${MONSTER_COLORS[index % MONSTER_COLORS.length]}`;
+        const strong = document.createElement("strong");
+        strong.textContent = `${index + 1}. ${opt.label}`;
+        const span = document.createElement("span");
+        appendClause(span, opt.detail);
+        btn.append(strong, span);
+        btn.addEventListener("click", () => pick(index));
+        return btn;
+      }),
+    );
+  } else if (state.opened) {
+    promptEl.textContent = "Three games from the query.";
+    optionsEl.replaceChildren();
+  } else if (done === total) {
+    promptEl.textContent = "Click the discover tile.";
+    optionsEl.replaceChildren();
   } else {
-    promptEl.textContent = "Dig up into a tunnel. The monsters will make you choose.";
+    promptEl.textContent = "Knock the dirt and sand aside.";
+    optionsEl.replaceChildren();
   }
-  foundEl.textContent = "";
-  if (state.log.length) {
-    foundEl.append(el("h2", null, "From the Find a Game list"));
-    for (const entry of state.log) {
-      const wrap = el("div", "card");
-      wrap.append(el("h3", null, entry.label));
-      const how = entry.via === "crush" ? "A rock settled it." : "You pumped them.";
-      wrap.append(el("p", null, how));
-      for (const game of entry.games) {
-        const card = el("div", "card");
-        card.append(el("h3", null, game.title));
-        for (const field of game.fields) {
-          card.append(el("p", null, `${field.label}: ${field.value}`));
-        }
-        card.append(el("p", null, `App ${game.app_id}`));
-        wrap.append(card);
-      }
-      foundEl.append(wrap);
+
+  filtersEl.replaceChildren();
+  for (const item of state.encounters) {
+    if (!item.selection) continue;
+    const opt = item.options.find((option) => option.id === item.selection);
+    const line = document.createElement("p");
+    line.className = "filter-line";
+    line.append(`${opt.label}: `);
+    appendClause(line, opt.detail);
+    filtersEl.append(line);
+  }
+
+  foundEl.replaceChildren();
+  if (state.opened && state.games) {
+    const heading = document.createElement("h2");
+    heading.textContent = "Inside the tile";
+    foundEl.append(heading);
+    for (const game of state.games) {
+      const card = document.createElement("article");
+      card.className = "card";
+      const title = document.createElement("h3");
+      title.textContent = game.title;
+      const body = document.createElement("p");
+      body.textContent = [
+        game.review_score,
+        game.released,
+        `${Number(game.total_reviews).toLocaleString()} reviews (${Number(game.positive).toLocaleString()} positive, ${Number(game.negative).toLocaleString()} negative)`,
+        `app ${game.app_id}`,
+      ].join(" · ");
+      card.append(title, body);
+      foundEl.append(card);
     }
   }
+  sourceEl.textContent = "findGames on games and game_tags. The three games are the first rows of that query, drawn inside the broken tile and listed here.";
 }
 
-function reset() {
-  state = buildWorld();
-  panelSig = "";
-  lastMove = 0;
-  lastPump = 0;
-  lastPatrol = 0;
-  renderPanel(true);
-  canvas.focus();
+function signature() {
+  return JSON.stringify({
+    held: state.held,
+    sels: state.encounters.map((enc) => enc.selection),
+    message: state.message,
+    query: state.query,
+    opened: state.opened,
+    wantOpen: state.wantOpen,
+    games: (state.games || []).map((game) => game.app_id),
+  });
 }
 
-const MOVE_KEYS = {
-  arrowup: "up",
-  w: "up",
-  arrowdown: "down",
-  s: "down",
-  arrowleft: "left",
-  a: "left",
-  arrowright: "right",
-  d: "right",
-};
+function frame(now) {
+  if (state && keys.size && now - lastMove >= 145) {
+    lastMove = now;
+    tryMove(keys.values().next().value);
+  }
+  if (state && state.wantOpen && !state.opened && state.query === "ready" && state.games && state.games.length >= 1) {
+    if (now - state.crackStart > 650) {
+      state.opened = true;
+      state.message = "The tile broke open.";
+    }
+  }
+  if (state) {
+    draw(now);
+    const sig = signature();
+    if (sig !== panelSig) {
+      panelSig = sig;
+      renderPanel();
+    }
+  }
+  requestAnimationFrame(frame);
+}
 
-function onKeyDown(event) {
+window.addEventListener("keydown", (ev) => {
   if (!state) return;
-  const key = event.key.toLowerCase();
-  if (MOVE_KEYS[key] || key === " ") event.preventDefault();
-  if (key === "r" && !event.ctrlKey && !event.metaKey && state.status !== "play") {
-    event.preventDefault();
-    reset();
+  const dir = KEY_DIR[ev.key];
+  if (dir) {
+    ev.preventDefault();
+    const now = performance.now();
+    if (now - lastMove >= 145) {
+      lastMove = now;
+      tryMove(dir);
+    }
+    keys.add(dir);
     return;
   }
-  if (state.status !== "play") return;
-  const now = performance.now();
-  if (MOVE_KEYS[key] && now - lastMove >= 145) {
-    tryMove(MOVE_KEYS[key], now);
-    lastMove = now;
+  if (ev.key === "1" || ev.key === "2" || ev.key === "3") {
+    ev.preventDefault();
+    pick(Number(ev.key) - 1);
   }
-  if (key >= "1" && key <= "9" && !event.repeat) choose(Number(key));
-  if (key === " " && !event.repeat) {
-    pump(now);
-    lastPump = now;
-  }
-  keys.add(key);
-}
+});
 
-function onKeyUp(event) {
-  keys.delete(event.key.toLowerCase());
-}
+window.addEventListener("keyup", (ev) => {
+  const dir = KEY_DIR[ev.key];
+  if (dir) keys.delete(dir);
+});
 
-window.addEventListener("keydown", onKeyDown);
-window.addEventListener("keyup", onKeyUp);
-canvas.addEventListener("pointerdown", () => canvas.focus());
-
-async function boot() {
-  try {
-    const response = await fetch("/api/level");
-    if (!response.ok) throw new Error(`game list request failed (${response.status})`);
-    blueprint = await response.json();
-    if (!blueprint.encounters || blueprint.encounters.length < 1) {
-      throw new Error("the game list did not include any choices");
+canvas.addEventListener("click", (ev) => {
+  canvas.focus();
+  if (!state) return;
+  const cell = cellFromEvent(ev);
+  if (!inBounds(cell.c, cell.r)) return;
+  const enc = heldEncounter();
+  if (enc) {
+    const monster = enc.monsters.find((item) => item.c === cell.c && item.r === cell.r);
+    if (monster) {
+      pick(monster.index);
+      return;
     }
-    sourceEl.textContent = `${blueprint.row_count} games from the Find a Game for Me list (recent_top_games).`;
-    reset();
-    cancelAnimationFrame(loopId);
-    loopId = requestAnimationFrame(tick);
-    window.__digdug = {
-      get state() { return state; },
-      choose,
-      reset,
-    };
-  } catch (error) {
-    fail(error.message || "Could not load games.");
   }
-}
+  if (state.tiles[cell.r][cell.c] === "X") tryOpen();
+});
 
-boot();
+window.__digdug = {
+  choose(n) {
+    pick(n - 1);
+  },
+  reset() {
+    queryToken += 1;
+    buildWorld();
+    renderPanel();
+  },
+  snapshot() {
+    if (!state) return null;
+    return {
+      c: state.player.c,
+      r: state.player.r,
+      facing: state.facing,
+      held: state.held,
+      query: state.query,
+      opened: state.opened,
+      wantOpen: state.wantOpen,
+      message: state.message,
+      adjacent: adjacentToDiscover(),
+      dirt: state.tiles.flat().filter((tile) => tile === "d").length,
+      sand: state.tiles.flat().filter((tile) => tile === "s").length,
+      selections: Object.fromEntries(state.encounters.map((enc) => [enc.id, enc.selection])),
+      games: state.games,
+      tile: state.tiles[state.player.r][state.player.c],
+    };
+  },
+};
+
+fetch("/api/level")
+  .then((res) => {
+    if (!res.ok) throw new Error("level failed");
+    return res.json();
+  })
+  .then((level) => {
+    blueprint = level;
+    buildWorld();
+    renderPanel();
+    canvas.focus();
+  })
+  .catch(() => {
+    fail("Could not load the avenues.");
+  });
+
+requestAnimationFrame(frame);

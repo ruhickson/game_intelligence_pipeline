@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""Dig Dug level whose encounters choose from the Find a Game for Me list.
+"""Dig Dug level that builds one Find a Game search across seven avenues.
 
-The only game query is the pre-populate query documented for that page:
-the Cube ``RecentTopGames`` read, compiled to SQL against ``recent_top_games``.
-Encounter options are comparable values on those rows (review label, quick
-recency, and the review total the query already sorts by). Nothing here
-adds another filter query.
+Each avenue adds one filter from the Find a Game for Me player search
+(``findGames`` in gamediscoverytool). After the last avenue, that accumulated
+query runs against ``games`` and ``game_tags``. Clicking the discover tile
+shows the first three rows.
+
+The always-on predicates are the ones the Games cube adds on every search:
+type ``game``, name not a playtest, ``coming_soon`` null or false, and adult
+exclusion (tags Sexual Content and Hentai, plus the content-descriptor
+substrings). Page defaults that would omit a clause (review Any, min reviews
+0, max reviews 10000000, hours off, AI any, no tags) are not added here. The
+avenue choice is what adds that clause. Recency is a single date window, the
+one the player picked, because the page has only one release-date range.
 
 Run from the repo root:
 
@@ -20,7 +27,7 @@ import json
 import os
 import re
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -30,7 +37,7 @@ WEB = ROOT / "dig_dug_web"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# Page rank, best first. Same array findGames uses for "or better".
+# Page rank, best first. "Or better" sends this prefix through the chosen label.
 REVIEW_DESC_ORDER = (
     "Overwhelmingly Positive",
     "Very Positive",
@@ -42,54 +49,206 @@ REVIEW_DESC_ORDER = (
     "Very Negative",
     "Overwhelmingly Negative",
 )
-REVIEW_RANK = {label: index for index, label in enumerate(REVIEW_DESC_ORDER)}
 
-# getRecentTopGames always adds these when adult games are off.
+# getRecentTopGames / findGames add these when includeAdultGames is false.
 ADULT_TAGS = ("Sexual Content", "Hentai")
-# getAppIdsForContentDescriptors substring list, case-insensitive.
 DESCRIPTOR_PATTERNS = (
     "sexual assault",
     "non-consensual",
-    "bdsm",
+    "BDSM",
     "extreme violence",
     "rape",
 )
 
-# Quick ranges from GameFinder.updateQuickDates, tightest first.
-# day counts are the page's N×24h offsets. "beginning" is 1900-01-01.
-QUICK_RANGES = (
-    ("last3days", "Last 3 days", 3),
-    ("lastweek", "Last week", 7),
-    ("last2weeks", "Last 2 weeks", 14),
-    ("lastmonth", "Last month", 30),
-    ("last3months", "Last 3 months", 90),
-    ("lastyear", "Last year", 365),
-    ("last2years", "Last 2 years", 365 * 2),
-    ("last3years", "Last 3 years", 365 * 3),
-    ("last5years", "Last 5 years", 365 * 5),
-    ("beginning", "Beginning of time", None),
+# GameFinder.updateQuickDates. N is a multiple of 24h, then the UTC date.
+RECENCY_DAYS = {
+    "lastyear": 365,
+    "last3years": 365 * 3,
+    "last5years": 365 * 5,
+}
+
+# Page default order and cap. The tile shows the first three of this list.
+RESULT_LIMIT = 100
+SHOWN = 3
+
+# Worst combination of the options below. Startup refuses to serve if this
+# returns fewer than three games, so every other combination (looser nested
+# recency and review label, and the other tag / review-count / AI / exclude
+# options) still has a tile to open.
+WORST_CHOICES = {
+    "recency": "lastyear",
+    "review-score": "overwhelmingly-positive",
+    "tag": "indie",
+    "min-reviews": "min-500",
+    "max-reviews": "max-20000",
+    "ai": "declared",
+    "exclude-tag": "exclude-early-access",
+}
+
+ALWAYS = (
+    "type = 'game'",
+    "name NOT ILIKE '%playtest%'",
+    "release_date.coming_soon IS NULL OR 'false'",
+    "exclude tags Sexual Content and Hentai",
+    "exclude content descriptors sexual assault, non-consensual, BDSM, extreme violence, rape",
+    "ORDER BY total_positive + total_negative DESC",
+    f"LIMIT {RESULT_LIMIT}",
 )
 
-# Compiled RecentTopGames query (no adult filter in the SQL text; the
-# page adds app-id exclusion first, applied below to this same snapshot).
-PREPOPULATE_SQL = """
-SELECT
-  recent_top_games.name,
-  recent_top_games.app_id,
-  recent_top_games.review_score_desc,
-  (recent_top_games.release_date_actual::timestamptz AT TIME ZONE 'UTC'),
-  sum(recent_top_games.total_positive),
-  sum(recent_top_games.total_negative),
-  sum(COALESCE(total_positive, 0) + COALESCE(total_negative, 0))
-FROM recent_top_games
-GROUP BY 1, 2, 3, 4
-ORDER BY 7 DESC
-LIMIT 100
-"""
+# Avenue order is the order the player reaches them, bottom to top.
+ENCOUNTERS = (
+    {
+        "id": "recency",
+        "dimension": "quickDateRange",
+        "prompt": "How recent should the release be?",
+        "options": (
+            {
+                "id": "lastyear",
+                "label": "Last year",
+                "filter": {"quickDateRange": "lastyear"},
+            },
+            {
+                "id": "last3years",
+                "label": "Last 3 years",
+                "filter": {"quickDateRange": "last3years"},
+            },
+            {
+                "id": "last5years",
+                "label": "Last 5 years",
+                "filter": {"quickDateRange": "last5years"},
+            },
+        ),
+    },
+    {
+        "id": "review-score",
+        "dimension": "reviewScore",
+        "prompt": "Which review score, or better?",
+        "options": (
+            {
+                "id": "overwhelmingly-positive",
+                "label": "Overwhelmingly Positive",
+                "filter": {
+                    "reviewScore": "Overwhelmingly Positive",
+                    "reviewScoreOrBetter": True,
+                },
+            },
+            {
+                "id": "very-positive",
+                "label": "Very Positive or better",
+                "filter": {
+                    "reviewScore": "Very Positive",
+                    "reviewScoreOrBetter": True,
+                },
+            },
+            {
+                "id": "mostly-positive",
+                "label": "Mostly Positive or better",
+                "filter": {
+                    "reviewScore": "Mostly Positive",
+                    "reviewScoreOrBetter": True,
+                },
+            },
+        ),
+    },
+    {
+        "id": "tag",
+        "dimension": "tags",
+        "prompt": "Which tag should it include?",
+        "options": (
+            {
+                "id": "singleplayer",
+                "label": "Singleplayer",
+                "filter": {"tags": ["Singleplayer"]},
+            },
+            {
+                "id": "indie",
+                "label": "Indie",
+                "filter": {"tags": ["Indie"]},
+            },
+            {
+                "id": "casual",
+                "label": "Casual",
+                "filter": {"tags": ["Casual"]},
+            },
+        ),
+    },
+    {
+        "id": "min-reviews",
+        "dimension": "minReviews",
+        "prompt": "How many reviews, at least?",
+        "options": (
+            {
+                "id": "min-100",
+                "label": "At least 100 reviews",
+                "filter": {"minReviews": 100},
+            },
+            {
+                "id": "min-500",
+                "label": "At least 500 reviews",
+                "filter": {"minReviews": 500},
+            },
+        ),
+    },
+    {
+        "id": "max-reviews",
+        "dimension": "maxReviews",
+        "prompt": "How many reviews, at most?",
+        "options": (
+            {
+                "id": "max-20000",
+                "label": "At most 20,000 reviews",
+                "filter": {"maxReviews": 20000},
+            },
+            {
+                "id": "max-50000",
+                "label": "At most 50,000 reviews",
+                "filter": {"maxReviews": 50000},
+            },
+        ),
+    },
+    {
+        "id": "ai",
+        "dimension": "aiDeclaration",
+        "prompt": "Declared as made with AI?",
+        "options": (
+            {
+                "id": "not-declared",
+                "label": "No",
+                "filter": {"aiDeclaration": "not_declared"},
+            },
+            {
+                "id": "declared",
+                "label": "Yes",
+                "filter": {"aiDeclaration": "declared"},
+            },
+        ),
+    },
+    {
+        "id": "exclude-tag",
+        "dimension": "excludeTags",
+        "prompt": "Which tag should be left out?",
+        "options": (
+            {
+                "id": "exclude-early-access",
+                "label": "Exclude Early Access",
+                "filter": {"excludeTags": ["Early Access"]},
+            },
+            {
+                "id": "exclude-free-to-play",
+                "label": "Exclude Free to Play",
+                "filter": {"excludeTags": ["Free to Play"]},
+            },
+        ),
+    },
+)
 
 HOST = "0.0.0.0"
 PORT = 8765
-GAMES_ON_CARD = 4
+
+AI_SQL = {
+    "declared": "g.made_with_ai IS TRUE",
+    "not_declared": "g.made_with_ai IS FALSE",
+}
 
 
 def connection_string() -> str:
@@ -100,7 +259,6 @@ def connection_string() -> str:
     value = os.getenv("SUPABASE_CONNECTION_STRING")
     if value:
         return value
-    # The Steam migration script already stores the pipeline connection string.
     script = (ROOT / "create_games_steam_table.py").read_text()
     match = re.search(
         r"""os\.environ\[\s*['"]SUPABASE_CONNECTION_STRING['"]\s*\]\s*=\s*['"]([^'"]+)['"]""",
@@ -114,315 +272,260 @@ def connection_string() -> str:
     return match.group(1)
 
 
-def _as_int(value) -> int:
-    if value is None:
-        return 0
-    return int(value)
+def _safe_error(exc: Exception) -> str:
+    text = str(exc)
+    if "postgresql://" in text or "password" in text.lower():
+        return exc.__class__.__name__
+    return text
 
 
-def _as_date(value):
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    return None
+def _option(encounter: dict, option_id: str) -> dict:
+    for option in encounter["options"]:
+        if option["id"] == option_id:
+            return option
+    raise ValueError(f"unknown option {option_id!r} for {encounter['id']}")
 
 
-def run_find_a_game_query(conn) -> list[dict]:
-    """Run the Find a Game for Me pre-populate query and return its rows.
-
-    This is the only game query. Adult-tag and content-descriptor exclusion
-    is the first step of getRecentTopGames (includeAdultGames defaults to
-    false). Exclusion is applied to this snapshot, which is the table the
-    SELECT reads (100 rows).
-    """
-    import psycopg2
-
-    with conn.cursor() as cur:
-        cur.execute("SET statement_timeout = '30s'")
-        cur.execute(PREPOPULATE_SQL)
-        raw_rows = cur.fetchall()
-        app_ids = [row[1] for row in raw_rows]
-        excluded = set()
-        if app_ids:
-            for tag in ADULT_TAGS:
-                cur.execute(
-                    """
-                    SELECT DISTINCT app_id
-                    FROM game_tags
-                    WHERE tag = %s
-                      AND app_id = ANY(%s)
-                    """,
-                    (tag, app_ids),
-                )
-                excluded.update(hit[0] for hit in cur.fetchall())
-            cur.execute(
-                """
-                SELECT app_id, content_descriptors
-                FROM recent_top_games
-                WHERE app_id = ANY(%s)
-                """,
-                (app_ids,),
-            )
-            for app_id, descriptors in cur.fetchall():
-                text = str(descriptors or "").lower()
-                if any(pattern in text for pattern in DESCRIPTOR_PATTERNS):
-                    excluded.add(app_id)
-
-    rows = []
-    for name, app_id, review, released, positive, negative, total in raw_rows:
-        if app_id in excluded:
-            continue
-        rows.append(
-            {
-                "app_id": int(app_id),
-                "title": (name or "").strip() or "Untitled",
-                "review_score": review or "",
-                "released": _as_date(released),
-                "positive": _as_int(positive),
-                "negative": _as_int(negative),
-                "total_reviews": _as_int(total),
-            }
-        )
-    rows.sort(
-        key=lambda row: (
-            -row["total_reviews"],
-            REVIEW_RANK.get(row["review_score"], 99),
-            row["app_id"],
-        )
-    )
-    return rows
+def _selected(choices: dict) -> list[tuple[dict, dict]]:
+    if not isinstance(choices, dict):
+        raise ValueError("choices must be an object")
+    unknown = set(choices) - {enc["id"] for enc in ENCOUNTERS}
+    if unknown:
+        raise ValueError(f"unknown encounter {sorted(unknown)[0]}")
+    selected = []
+    for encounter in ENCOUNTERS:
+        if encounter["id"] not in choices:
+            raise ValueError(f"missing choice for {encounter['id']}")
+        selected.append((encounter, _option(encounter, choices[encounter["id"]])))
+    return selected
 
 
-def _card(row: dict) -> dict:
-    released = row["released"].isoformat() if row["released"] else "Unknown"
-    reviews = (
-        f'{row["total_reviews"]:,} '
-        f'({row["positive"]:,} positive, {row["negative"]:,} negative)'
-    )
-    return {
-        "app_id": row["app_id"],
-        "title": row["title"],
-        "fields": [
-            {"label": "Review score", "value": row["review_score"] or "Unknown"},
-            {"label": "Released", "value": released},
-            {"label": "Reviews", "value": reviews},
-        ],
-    }
+def _labels_or_better(label: str) -> tuple[str, ...]:
+    index = REVIEW_DESC_ORDER.index(label)
+    return REVIEW_DESC_ORDER[: index + 1]
 
 
-def _option(option_id: str, label: str, detail: str, filt: dict, matches: list[dict]) -> dict:
-    if len(matches) < 1:
-        raise RuntimeError(f"option {label!r} matched no rows")
-    return {
-        "id": option_id,
-        "label": label,
-        "detail": detail,
-        "filter": filt,
-        "match_count": len(matches),
-        "games": [_card(row) for row in matches[:GAMES_ON_CARD]],
-    }
+def _date_window(now: datetime, days: int) -> tuple:
+    moment = now.astimezone(timezone.utc)
+    today = moment.date()
+    start = (moment - timedelta(days=days)).date()
+    return start, today
 
 
-def _slug(text: str) -> str:
-    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in text)
-    return "-".join(part for part in cleaned.split("-") if part)[:60] or "option"
+def clause_text(encounter: dict, option: dict, now: datetime) -> str:
+    """The SQL predicate this avenue option adds. Built only from our options."""
+    filt = option["filter"]
+    if encounter["dimension"] == "quickDateRange":
+        start, today = _date_window(now, RECENCY_DAYS[option["id"]])
+        return f"release_date_actual BETWEEN {start.isoformat()} AND {today.isoformat()}"
+    if encounter["dimension"] == "reviewScore":
+        labels = _labels_or_better(filt["reviewScore"])
+        quoted = ", ".join(f"'{label}'" for label in labels)
+        return f"review_score_desc IN ({quoted})"
+    if encounter["dimension"] == "tags":
+        return f"game_tags.tag = '{filt['tags'][0]}'"
+    if encounter["dimension"] == "minReviews":
+        return f"(total_positive + total_negative) >= {int(filt['minReviews'])}"
+    if encounter["dimension"] == "maxReviews":
+        return f"(total_positive + total_negative) <= {int(filt['maxReviews'])}"
+    if encounter["dimension"] == "aiDeclaration":
+        word = "TRUE" if filt["aiDeclaration"] == "declared" else "FALSE"
+        return f"made_with_ai IS {word}"
+    if encounter["dimension"] == "excludeTags":
+        tag = filt["excludeTags"][0]
+        return f"app_id NOT IN (SELECT app_id FROM game_tags WHERE tag = '{tag}')"
+    raise ValueError(f"unknown dimension {encounter['dimension']}")
 
 
-def _review_score_encounter(rows: list[dict]) -> dict | None:
-    by_label: dict[str, list[dict]] = {}
-    for row in rows:
-        if row["review_score"]:
-            by_label.setdefault(row["review_score"], []).append(row)
-    labels = [label for label in REVIEW_DESC_ORDER if by_label.get(label)]
-    # Keep the encounter to one pack of monsters.
-    labels = labels[:3]
-    if len(labels) < 2:
-        return None
-    options = []
-    for label in labels:
-        matches = by_label[label]
-        options.append(
-            _option(
-                _slug(label),
-                label,
-                f"{len(matches)} games",
-                {"reviewScore": label},
-                matches,
-            )
-        )
-    return {
-        "id": "review-score",
-        "dimension": "reviewScore",
-        "prompt": "Which review score should we dig up?",
-        "options": options,
-    }
-
-
-def _window_start(now: datetime, days: int | None) -> date:
-    if days is None:
-        return date(1900, 1, 1)
-    # GameFinder uses instant subtraction, then the UTC date (toISOString).
-    return (now - timedelta(days=days)).date()
-
-
-def _recency_encounter(rows: list[dict], now: datetime) -> dict | None:
-    today = now.date()
-    seen: list[frozenset] = []
-    options = []
-    for key, label, days in QUICK_RANGES:
-        start = _window_start(now, days)
-        matches = [
-            row
-            for row in rows
-            if row["released"] is not None and start <= row["released"] <= today
-        ]
-        if not matches:
-            continue
-        identity = frozenset(row["app_id"] for row in matches)
-        if any(identity == previous for previous in seen):
-            continue
-        seen.append(identity)
-        options.append(
-            _option(
-                key,
-                label,
-                f"{len(matches)} games",
-                {
-                    "quickDateRange": key,
-                    "minDate": start.isoformat(),
-                    "maxDate": today.isoformat(),
-                },
-                matches,
-            )
-        )
-        if len(options) == 3:
-            break
-    if len(options) < 2:
-        return None
-    return {
-        "id": "recency",
-        "dimension": "quickDateRange",
-        "prompt": "How recent should the release be?",
-        "options": options,
-    }
-
-
-def _review_total_encounter(rows: list[dict]) -> dict | None:
-    """Split the query's review total into minReviews / maxReviews choices.
-
-    Cut points are totals that actually appear on the rows. The measure is
-    RecentTopGames.totalReviews (total_positive + total_negative).
-    """
-    distinct = sorted({row["total_reviews"] for row in rows})
-    if len(distinct) < 2:
-        return None
-
-    def pack(low_inclusive, high_exclusive, label, filt):
-        matches = [
-            row
-            for row in rows
-            if low_inclusive <= row["total_reviews"] < high_exclusive
-        ]
-        if not matches:
-            return None
-        return _option(_slug(label), label, f"{len(matches)} games", filt, matches)
-
-    lo = distinct[len(distinct) // 3]
-    hi = distinct[(2 * len(distinct)) // 3]
-    options = []
-    if hi > lo:
-        options = [
-            item
-            for item in (
-                pack(hi, 10**12, f"At least {hi:,} reviews", {"minReviews": hi}),
-                pack(
-                    lo,
-                    hi,
-                    f"{lo:,}–{hi - 1:,} reviews",
-                    {"minReviews": lo, "maxReviews": hi - 1},
-                ),
-                pack(0, lo, f"Under {lo:,} reviews", {"maxReviews": lo - 1}),
-            )
-            if item is not None
-        ]
-    if len(options) < 2:
-        median = distinct[len(distinct) // 2]
-        if median == distinct[0]:
-            median = distinct[1]
-        options = [
-            item
-            for item in (
-                pack(median, 10**12, f"At least {median:,} reviews", {"minReviews": median}),
-                pack(0, median, f"Under {median:,} reviews", {"maxReviews": median - 1}),
-            )
-            if item is not None
-        ]
-    options = options[:3]
-    if len(options) < 2:
-        return None
-    return {
-        "id": "review-total",
-        "dimension": "totalReviews",
-        "prompt": "How many reviews should it have?",
-        "options": options,
-    }
-
-
-def build_encounters(rows: list[dict], now: datetime | None = None) -> list[dict]:
-    """Turn one pre-populate result into encounter choices. No extra query."""
+def build_level(now: datetime | None = None) -> dict:
     if now is None:
         now = datetime.now(timezone.utc)
-    encounters = [
-        _review_score_encounter(rows),
-        _recency_encounter(rows, now),
-        _review_total_encounter(rows),
-    ]
-    built = [enc for enc in encounters if enc is not None]
-    known = {row["app_id"] for row in rows}
-    for enc in built:
-        if len(enc["options"]) < 2:
-            raise RuntimeError(f"{enc['id']} needs two or more choices")
-        for option in enc["options"]:
-            for game in option["games"]:
-                if game["app_id"] not in known:
-                    raise RuntimeError("choice listed a game outside the query")
-    return built
-
-
-def build_level(rows: list[dict], now: datetime | None = None) -> dict:
-    encounters = build_encounters(rows, now)
-    if not encounters:
-        raise RuntimeError("the pre-populate query did not yield two comparable choices")
+    encounters = []
+    for encounter in ENCOUNTERS:
+        encounters.append(
+            {
+                "id": encounter["id"],
+                "dimension": encounter["dimension"],
+                "prompt": encounter["prompt"],
+                "options": [
+                    {
+                        "id": option["id"],
+                        "label": option["label"],
+                        "detail": clause_text(encounter, option, now),
+                        "filter": option["filter"],
+                    }
+                    for option in encounter["options"]
+                ],
+            }
+        )
     return {
-        "row_count": len(rows),
-        "source": "recent_top_games",
+        "source": "games, game_tags",
+        "query": "findGames",
+        "shown": SHOWN,
+        "limit": RESULT_LIMIT,
         "encounters": encounters,
     }
 
 
-def load_level(conn) -> dict:
-    rows = run_find_a_game_query(conn)
-    if not rows:
-        raise RuntimeError("recent_top_games returned no rows")
-    return build_level(rows)
+def _card(row) -> dict:
+    name, app_id, review, released, positive, negative, total = row
+    if hasattr(released, "isoformat"):
+        released_text = released.isoformat()
+    elif released is None:
+        released_text = ""
+    else:
+        released_text = str(released)[:10]
+    return {
+        "app_id": int(app_id),
+        "title": (name or "").strip() or "Untitled",
+        "review_score": review or "",
+        "released": released_text,
+        "positive": int(positive or 0),
+        "negative": int(negative or 0),
+        "total_reviews": int(total or 0),
+    }
+
+
+def run_find_games(conn, choices: dict, now: datetime | None = None) -> dict:
+    """Run the accumulated findGames search and keep the first three rows."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    selected = _selected(choices)
+    by_id = {enc["id"]: opt for enc, opt in selected}
+
+    start, today = _date_window(now, RECENCY_DAYS[by_id["recency"]["id"]])
+    review = by_id["review-score"]["filter"]
+    labels = list(_labels_or_better(review["reviewScore"]))
+    min_reviews = int(by_id["min-reviews"]["filter"]["minReviews"])
+    max_reviews = int(by_id["max-reviews"]["filter"]["maxReviews"])
+    if min_reviews <= 0 or max_reviews >= 1000000 or max_reviews < min_reviews:
+        raise ValueError("review bounds are outside the finder rules")
+    include_tag = by_id["tag"]["filter"]["tags"][0]
+    exclude_tag = by_id["exclude-tag"]["filter"]["excludeTags"][0]
+    ai_key = by_id["ai"]["filter"]["aiDeclaration"]
+    if ai_key not in AI_SQL:
+        raise ValueError("unknown AI declaration")
+
+    # CASE evaluates the jsonb cast only when release_date looks like JSON,
+    # so a plain-text date cannot abort the statement. The kept values match
+    # the cube wrapper: coming_soon null or the string false.
+    sql = (
+        """
+        SELECT
+          g.name,
+          g.app_id,
+          g.review_score_desc,
+          g.release_date_actual,
+          COALESCE(g.total_positive, 0),
+          COALESCE(g.total_negative, 0),
+          (COALESCE(g.total_positive, 0) + COALESCE(g.total_negative, 0)) AS total_reviews
+        FROM games g
+        WHERE g.type = 'game'
+          AND g.name NOT ILIKE '%%playtest%%'
+          AND CASE
+                WHEN g.release_date IS NULL OR g.release_date !~ '^[\\[{]' THEN TRUE
+                ELSE COALESCE(g.release_date::jsonb->>'coming_soon', 'false') = 'false'
+              END
+          AND NOT EXISTS (
+            SELECT 1 FROM game_tags t
+            WHERE t.app_id = g.app_id AND t.tag = ANY(%s)
+          )
+          AND NOT (
+            COALESCE(g.content_descriptors, '') ILIKE '%%sexual assault%%'
+            OR COALESCE(g.content_descriptors, '') ILIKE '%%non-consensual%%'
+            OR COALESCE(g.content_descriptors, '') ILIKE '%%BDSM%%'
+            OR COALESCE(g.content_descriptors, '') ILIKE '%%extreme violence%%'
+            OR COALESCE(g.content_descriptors, '') ILIKE '%%rape%%'
+          )
+          AND g.release_date_actual BETWEEN %s AND %s
+          AND g.review_score_desc = ANY(%s)
+          AND (COALESCE(g.total_positive, 0) + COALESCE(g.total_negative, 0)) >= %s
+          AND (COALESCE(g.total_positive, 0) + COALESCE(g.total_negative, 0)) <= %s
+          AND """
+        + AI_SQL[ai_key]
+        + """
+          AND EXISTS (
+            SELECT 1 FROM game_tags t
+            WHERE t.app_id = g.app_id AND t.tag = %s
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM game_tags t
+            WHERE t.app_id = g.app_id AND t.tag = %s
+          )
+        ORDER BY total_reviews DESC, g.app_id
+        LIMIT """
+        + str(RESULT_LIMIT)
+    )
+    params = (
+        list(ADULT_TAGS),
+        start,
+        today,
+        labels,
+        min_reviews,
+        max_reviews,
+        include_tag,
+        exclude_tag,
+    )
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+    cards = [_card(row) for row in rows]
+    applied = [
+        {
+            "encounter": enc["id"],
+            "dimension": enc["dimension"],
+            "label": opt["label"],
+            "filter": opt["filter"],
+            "clause": clause_text(enc, opt, now),
+        }
+        for enc, opt in selected
+    ]
+    return {
+        "source": "games, game_tags",
+        "query": "findGames",
+        "returned": len(cards),
+        "shown": min(SHOWN, len(cards)),
+        "always": list(ALWAYS),
+        "applied": applied,
+        "games": cards[:SHOWN],
+    }
+
+
+def assert_playable(conn) -> int:
+    result = run_find_games(conn, WORST_CHOICES)
+    if len(result["games"]) < SHOWN:
+        raise RuntimeError(
+            f"tightest avenue combination returned {len(result['games'])} games"
+        )
+    return result["returned"]
+
+
+def discover(choices: dict) -> dict:
+    import psycopg2
+
+    conn = psycopg2.connect(connection_string(), connect_timeout=15)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = '25s'")
+        return run_find_games(conn, choices)
+    finally:
+        conn.close()
 
 
 class Handler(BaseHTTPRequestHandler):
-    level = None
+    def _send_json(self, payload: dict, status: int = 200) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/level":
-            body = json.dumps(self.level).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_json(build_level())
             return
         if path == "/":
             path = "/index.html"
@@ -443,16 +546,40 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def do_POST(self):
+        path = urlparse(self.path).path
+        if path != "/api/discover":
+            self.send_error(404)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 20000:
+            self._send_json({"error": "expected a small JSON body"}, 400)
+            return
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            choices = payload["choices"]
+            result = discover(choices)
+        except (ValueError, KeyError, TypeError) as exc:
+            self._send_json({"error": _safe_error(exc)}, 400)
+            return
+        except Exception as exc:
+            self._send_json({"error": _safe_error(exc)}, 500)
+            return
+        self._send_json(result)
+
     def log_message(self, fmt, *args):
         sys.stderr.write("%s\n" % (fmt % args))
 
 
-def serve(level: dict) -> None:
-    Handler.level = level
+def serve() -> None:
     ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer((HOST, PORT), Handler)
+    level = build_level()
     print(f"Dig Dug is at http://127.0.0.1:{PORT}/")
-    print(f"Pre-populate rows: {level['row_count']} from recent_top_games")
+    print("Query: findGames on games and game_tags")
     for enc in level["encounters"]:
         labels = ", ".join(opt["label"] for opt in enc["options"])
         print(f"  {enc['dimension']}: {labels}")
@@ -470,20 +597,17 @@ def main() -> None:
     try:
         conn = psycopg2.connect(connection_string(), connect_timeout=15)
     except Exception as exc:
-        text = str(exc)
-        if "postgresql://" in text or "password" in text.lower():
-            text = exc.__class__.__name__
-        raise SystemExit(f"Could not connect to the games database: {text}") from None
+        raise SystemExit(f"Could not connect to the games database: {_safe_error(exc)}") from None
     try:
-        level = load_level(conn)
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = '25s'")
+        found = assert_playable(conn)
     except Exception as exc:
-        text = str(exc)
-        if "postgresql://" in text:
-            text = exc.__class__.__name__
-        raise SystemExit(f"Could not run the Find a Game query: {text}") from None
+        raise SystemExit(f"Could not run the Find a Game query: {_safe_error(exc)}") from None
     finally:
         conn.close()
-    serve(level)
+    print(f"Tightest combination returned {found} games")
+    serve()
 
 
 if __name__ == "__main__":

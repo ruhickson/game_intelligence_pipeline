@@ -51,6 +51,7 @@ header p {
   border-radius: 8px;
   image-rendering: pixelated;
   touch-action: none;
+  cursor: pointer;
 }
 
 #panel {
@@ -108,10 +109,14 @@ header p {
   background: #3a2a12;
 }
 
-#meter {
-  min-height: 1.2em;
-  color: var(--gold);
-  font-weight: 700;
+#filters {
+  margin: 8px 0 0;
+}
+
+.filter-line {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .card {

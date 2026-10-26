@@ -10,22 +10,20 @@
   <div id="app">
     <header>
       <h1>Dig Dug</h1>
-      <p>Dig the tunnels. When a pack of monsters stops you, pick one of their terms, then pump until they pop.</p>
+      <p>Knock dirt and sand out of the way. At each avenue, two or three monsters ask you to pick one filter. After the last avenue, click the discover tile. It breaks open onto three games.</p>
     </header>
     <div id="layout">
       <canvas id="field" tabindex="0" aria-label="Dig Dug field"></canvas>
       <aside id="panel">
         <div id="hud">
-          <span id="score">Score 0</span>
-          <span id="lives">Lives 3</span>
-          <span id="left">Encounters 0</span>
+          <span id="progress">Avenues 0/7</span>
         </div>
         <p id="message"></p>
-        <h2 id="prompt">Loading the Find a Game list…</h2>
+        <h2 id="prompt">Loading the avenues…</h2>
         <div id="options"></div>
-        <p id="meter"></p>
+        <div id="filters"></div>
         <div id="found"></div>
-        <p id="help">Arrow keys or WASD move and dig. Number keys choose. Space pumps. A falling rock crushes whatever is under it.</p>
+        <p id="help">Arrow keys or WASD knock away dirt and sand. Number keys pick a monster’s option. Click the green tile once you have dug up to it.</p>
         <p id="source"></p>
       </aside>
     </div>
